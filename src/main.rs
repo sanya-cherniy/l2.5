@@ -8,15 +8,24 @@ fn main() {
     // Инициализируем аргументы
     let matches = args_init();
     // Получаем имена файлов
-    let files: Vec<String> = matches
+    let files = matches
         .get_many::<String>("files")
         .unwrap()
         .cloned() // Создаем клоны значений, так как get_many возвращает ссылки
-        .collect();
-    // Проверяем каждый файл на существование и выводим результат
+        ;
+
+    let mut prev = false; // Флаг отвечающий за то что в предыдущем файле были найдены строки для вывода
+    let files_count = files.len();
     for file in files {
         match File::open(&file) {
-            Ok(value) => file_checker(value, &matches),
+            Ok(value) => {
+                if files_count > 1 {
+                    // В случае указания более одного файла перед каждой строкой необходимо вывести название файла
+                    prev = file_checker(value, &matches, Some(file), prev);
+                } else {
+                    file_checker(value, &matches, None, prev);
+                }
+            }
             Err(_) => println!("{}: No such file or directory", file),
         };
     }
@@ -122,13 +131,16 @@ fn args_init() -> ArgMatches {
 }
 
 // Функция которая просматривает файл и выводит результат
-fn file_checker(input: File, matches: &ArgMatches) {
+fn file_checker(input: File, matches: &ArgMatches, file_name: Option<String>, prev: bool) -> bool {
+    let mut prev = prev;
+    let mut res = false;
     let reader = BufReader::new(input); // Считываем файл в память
     let str_vec: Vec<String> = reader.lines().map(|x| x.unwrap()).collect(); //Преобразуем в массив строк
     let mut count: u32 = 0;
     let mut expression = matches.get_one::<String>("patterns").unwrap().clone(); // Получаем выражение
     let mut after: usize = 0;
     let mut before: usize = 0;
+    let mut last_index = None;
     if matches.contains_id("after") {
         after = *matches.get_one::<usize>("after").unwrap(); // Кол-во строк для вывода после найденной строки (флаг -A)
     }
@@ -139,9 +151,12 @@ fn file_checker(input: File, matches: &ArgMatches) {
         after = *matches.get_one::<usize>("context").unwrap(); // Кол-во строк для вывода после и перед найденной строкой (флаг -B)
         before = after;
     }
-    if matches.get_flag("ignore-case") {
+    if matches.get_flag("ignore-case") && !matches.get_flag("fixed") {
         // Если включен флаг -i преобразуем выражение для игнорирования регистра
         expression = format!("(?i){}", expression);
+    }
+    if matches.get_flag("fixed") {
+        expression = regex::escape(expression.as_str());
     }
     let re = Regex::new(&expression).unwrap(); // Компилируем выражение
 
@@ -156,6 +171,20 @@ fn file_checker(input: File, matches: &ArgMatches) {
             is_match = re.is_match(str_vec[i].as_str()); // Функция возвращает true если переданная строка соответствует регулярному выражению, результат компиляции которого хранится в "re"
         }
         if is_match {
+            res = true;
+
+            if prev {
+                // Если установлен один из флагов -A -B -C и в предыдущем файле была выведена как минимум одна строка
+                if (matches.contains_id("before")
+                    || matches.contains_id("after")
+                    || matches.contains_id("context"))
+                    && !matches.get_flag("count")
+                {
+                    // Выводим "--" в соответствии с оригинальной утилитой grep
+                    println!("--");
+                }
+                prev = false;
+            }
             // Если в строке найдена подстрока соответствующая регулярному выражению
             if matches.get_flag("count") {
                 // Если включен флаг -c - только увеличиваем счетчик
@@ -164,8 +193,17 @@ fn file_checker(input: File, matches: &ArgMatches) {
                 if matches.contains_id("before") || matches.contains_id("context") {
                     // Если включен флаг -C или -B, необходимо напечатать n строк до найденной
                     let mut before_strings = vec![];
+                    let start;
 
-                    for j in (usize_max_sub(i, before)..=usize_max_sub(i, 1)).rev() {
+                    if i - last_index.unwrap_or(0) + 1 > before {
+                        start = usize_max_sub(i, before);
+                    } else {
+                        start = match last_index {
+                            Some(value) => value + 1,
+                            None => 0,
+                        };
+                    }
+                    for j in (start..=usize_max_sub(i, 1)).rev() {
                         // В цикле проходим строки от i-n включительно до i не включительно в обратном порядке
 
                         // Если находим строку которая тоже соответствует регулярному выражению - выходим из цикла (для флага -v - наоборот) необходимо напечатать n строк перед найденной, не соответствующих выражению либо, если меньше чем через n строк найдена строка которая соответствует выражению (для флага -v наоборот) - вывести все строки вплоть до найденной
@@ -187,18 +225,25 @@ fn file_checker(input: File, matches: &ArgMatches) {
                             before_strings.push(str_vec[j].clone());
                         }
                     }
+
                     // Выводим найденные строки в обратном порядке
                     for before_string in before_strings.iter().rev() {
+                        if file_name.is_some() {
+                            print!("{}-", file_name.clone().unwrap());
+                        }
                         println!("{}", before_string);
                     }
                 }
 
+                if file_name.is_some() {
+                    print!("{}:", file_name.clone().unwrap());
+                }
                 // Выводим текущую строку
                 if matches.get_flag("line-num") {
                     print!("{}:", i + 1);
                 }
                 println!("{}", str_vec[i]);
-
+                last_index = Some(i);
                 // Если включен флаг -C или -A, необходимо напечатать n строк после найденной, не соответствующих выражению либо, если меньше чем через n строк найдена строка которая соответствует выражению (для флага -v наоборот) - вывести все строки вплоть до найденной
                 if matches.contains_id("after") || matches.contains_id("context") {
                     for j in 1..=after {
@@ -217,10 +262,17 @@ fn file_checker(input: File, matches: &ArgMatches) {
                             }
                         }
 
+                        // let mut output = String::new();
+
+                        if file_name.is_some() {
+                            print!("{}-", file_name.clone().unwrap());
+                        }
+
                         if matches.get_flag("line-num") {
                             print!("{}-", i + j + 1);
                         }
                         println!("{}", str_vec[i + j]);
+                        last_index = Some(i + j);
                     }
                 }
             }
@@ -228,8 +280,12 @@ fn file_checker(input: File, matches: &ArgMatches) {
     }
 
     if matches.get_flag("count") {
+        if file_name.is_some() {
+            print!("{}:", file_name.clone().unwrap());
+        }
         println!("{}", count);
     }
+    return res;
 }
 // Вспомогательная фунция для нахождения наибольшей разницы usize без переполнения
 fn usize_max_sub(x: usize, y: usize) -> usize {
